@@ -9,44 +9,61 @@ namespace ColorPicker
     sealed class Palette
     {
         public Color Back, Surface, Hover, Pressed, Line, Text, Muted, Accent, AccentHover, AccentText, Success;
+        public Color[] Spectrum; // optional brand gradient, drawn as a thin strip on the Pick button
     }
 
     static class Theme
     {
+        // Brand theme: warm charcoal from the mascot's background, magenta from its polka dots,
+        // and the hexagon's rainbow as a thin strip on the Pick button.
         public static readonly Palette Dark = new Palette
         {
-            Back = Color.FromArgb(24, 30, 42),
-            Surface = Color.FromArgb(35, 44, 60),
-            Hover = Color.FromArgb(46, 58, 78),
-            Pressed = Color.FromArgb(56, 70, 94),
-            Line = Color.FromArgb(48, 59, 79),
-            Text = Color.FromArgb(226, 232, 240),
-            Muted = Color.FromArgb(140, 154, 178),
-            Accent = Color.FromArgb(59, 130, 246),
-            AccentHover = Color.FromArgb(37, 99, 235),
+            Back = Color.FromArgb(42, 41, 38),
+            Surface = Color.FromArgb(55, 54, 49),
+            Hover = Color.FromArgb(67, 66, 61),
+            Pressed = Color.FromArgb(80, 78, 72),
+            Line = Color.FromArgb(69, 67, 62),
+            Text = Color.FromArgb(238, 236, 231),
+            Muted = Color.FromArgb(162, 159, 151),
+            Accent = Color.FromArgb(194, 48, 159),
+            AccentHover = Color.FromArgb(163, 38, 138),
             AccentText = Color.White,
-            Success = Color.FromArgb(74, 222, 128)
+            Success = Color.FromArgb(74, 222, 128),
+            Spectrum = new[] { Color.FromArgb(255, 62, 245), Color.FromArgb(255, 138, 92), Color.FromArgb(245, 225, 90), Color.FromArgb(127, 216, 255) }
         };
 
         public static readonly Palette Light = new Palette
         {
-            Back = Color.White,
-            Surface = Color.FromArgb(243, 244, 246),
-            Hover = Color.FromArgb(229, 231, 235),
-            Pressed = Color.FromArgb(209, 213, 219),
-            Line = Color.FromArgb(229, 231, 235),
-            Text = Color.FromArgb(17, 24, 39),
-            Muted = Color.FromArgb(107, 114, 128),
-            Accent = Color.FromArgb(37, 99, 235),
-            AccentHover = Color.FromArgb(29, 78, 216),
+            Back = Color.FromArgb(247, 246, 243),
+            Surface = Color.FromArgb(236, 234, 229),
+            Hover = Color.FromArgb(226, 223, 217),
+            Pressed = Color.FromArgb(214, 211, 204),
+            Line = Color.FromArgb(226, 223, 217),
+            Text = Color.FromArgb(34, 33, 31),
+            Muted = Color.FromArgb(110, 107, 100),
+            Accent = Color.FromArgb(194, 48, 159),
+            AccentHover = Color.FromArgb(163, 38, 138),
             AccentText = Color.White,
-            Success = Color.FromArgb(22, 163, 74)
+            Success = Color.FromArgb(22, 163, 74),
+            Spectrum = new[] { Color.FromArgb(224, 32, 216), Color.FromArgb(240, 106, 48), Color.FromArgb(217, 168, 0), Color.FromArgb(31, 168, 224) } // deeper so it reads on a light background
         };
 
         public static Palette Current = Dark;
         public static bool IsDark { get { return Current == Dark; } }
 
         [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] static extern int SetWindowTheme(IntPtr hwnd, string app, string idList);
+
+        // Dark scrollbars in dark mode (Windows 10 1809+). Older versions keep the normal ones.
+        public static void ApplyScrollbars(Control c)
+        {
+            if (!c.IsHandleCreated) return;
+            try { SetWindowTheme(c.Handle, IsDark ? "DarkMode_Explorer" : "Explorer", null); }
+            catch (DllNotFoundException) { }
+            catch (EntryPointNotFoundException) { }
+            c.Invalidate();
+        }
 
         // Dark title bar on Windows 10 (2004+) and 11. Older versions just keep the normal one.
         public static void ApplyTitleBar(Form f)

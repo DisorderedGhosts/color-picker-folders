@@ -33,7 +33,7 @@ namespace ColorPicker
             }
         }
 
-        // Show the error instead of vanishing silently, and keep a copy in crash.log next to the .exe.
+        // Show the error instead of vanishing silently, and keep a copy in %APPDATA%\ColorPicker\crash.log.
         static void Crash(Exception ex)
         {
             string text = ex == null ? "Unknown error" : ex.ToString();

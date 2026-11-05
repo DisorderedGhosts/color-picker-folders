@@ -10,6 +10,6 @@ if not exist "%CSC%" (
   exit /b 1
 )
 if not exist bin mkdir bin
-"%CSC%" /nologo /target:winexe /optimize+ /platform:anycpu /langversion:5 /out:bin\ColorPicker.exe /win32icon:assets\app.ico /resource:assets\app.ico,ColorPicker.app.ico /r:System.Windows.Forms.dll /r:System.Drawing.dll src\*.cs
+"%CSC%" /nologo /target:winexe /optimize+ /platform:anycpu /langversion:5 /out:bin\ColorPicker.exe /win32icon:assets\app.ico /resource:assets\window.ico,ColorPicker.app.ico /r:System.Windows.Forms.dll /r:System.Drawing.dll src\*.cs
 if errorlevel 1 exit /b 1
 echo Built bin\ColorPicker.exe

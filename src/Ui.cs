@@ -17,9 +17,8 @@ namespace ColorPicker
             if (stream == null) return null;
             using (stream) return new Icon(stream);
         }
-        public static Icon Tray() { return Make(SystemInformation.SmallIconSize.Width); }
 
-        // A four-colour ring, drawn in code so the app needs no resource files.
+        // Fallback only (if the embedded icon is missing): a four-colour ring drawn in code.
         static Icon Make(int size)
         {
             using (var bmp = new Bitmap(size, size))

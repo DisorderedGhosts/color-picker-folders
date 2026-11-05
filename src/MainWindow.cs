@@ -1,17 +1,18 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 
 namespace ColorPicker
 {
     // The whole app in one small, wide window:
     //
-    //   [ Pick colour        ][⚙]   | [ Recent colours ▾      ][⋯]
-    //   [      big swatch       ]   | ■ ■ ■ ■ ■ ■
-    //   HEX  #3498DB          Copy  | ■ ■ ■
-    //   RGB / HSL / CMYK rows       |
-    //   [ Save to folder ▾      ]   |                 Ctrl+Alt+C tip
+    //   [ Pick colour   ][+pic][⚙]  | Folders                 [+folder]
+    //   [      big swatch       ]   | [ Recent colours card          ]
+    //   HEX / RGB / HSB / HSL /     | [ folder card                  ]
+    //   CMYK rows (click to copy)   |   (or, inside a folder: [←] name [⋯]
+    //   [ Save to folder ▾      ]   |    and a grid of its colours)
     sealed class MainWindow : Form
     {
         public const string WindowTitle = "Color Picker";
@@ -20,16 +21,19 @@ namespace ColorPicker
 
         readonly Store store;
         readonly HotkeyWindow hotkey;
-        readonly FlatButton pickButton, imageButton, settingsButton, saveButton, folderButton, folderMenuButton;
+        readonly FlatButton pickButton, imageButton, settingsButton, saveButton, backButton, newFolderButton, folderMenuButton;
+        readonly Label header = new Label();
         ImageWindow imageWindow;
         readonly SwatchPanel swatch = new SwatchPanel();
         readonly List<ValueRow> rows = new List<ValueRow>();
         readonly Panel divider = new Panel();
-        readonly FlowLayoutPanel tiles = new FlowLayoutPanel();
+        readonly FlowLayoutPanel tiles = new FlowLayoutPanel();    // colours of the open folder (wraps)
+        readonly FlowLayoutPanel cardList = new FlowLayoutPanel(); // folder cards (one column)
         readonly Label emptyLabel = new Label();
         readonly Label hint = new Label();
         readonly ToolTip tips = new ToolTip();
-        string folder; // null = recent colours
+        string folder;   // open folder; null = recent colours
+        bool inFolder;   // false = the list of folder cards
         Color? current;
         bool picking;
 
@@ -57,17 +61,15 @@ namespace ColorPicker
 
             // ---- left column: the current colour ----
             int y = pad;
-            pickButton = new FlatButton { Text = "Pick colour", Primary = true, Bounds = new Rectangle(pad, y, leftW - Dpi.Px(96), Dpi.Px(44)), Anchor = fixedLeft };
+            pickButton = new FlatButton { Text = "Pick colour", Primary = true, Spectrum = true, Bounds = new Rectangle(pad, y, leftW - Dpi.Px(112), Dpi.Px(44)), Anchor = fixedLeft };
             pickButton.Font = new Font(Font.FontFamily, 10.5f, FontStyle.Bold);
             pickButton.Click += delegate { StartPick(); };
             tips.SetToolTip(pickButton, "Or press " + HotkeyText + " from any app");
-            imageButton = new FlatButton { Text = "\uE8B9", Bounds = new Rectangle(pad + leftW - Dpi.Px(88), y, Dpi.Px(40), Dpi.Px(44)), Anchor = fixedLeft };
-            imageButton.Font = new Font("Segoe MDL2 Assets", 12f);
+            imageButton = new FlatButton { Icon = ButtonIcon.AddPicture, Bounds = new Rectangle(pad + leftW - Dpi.Px(104), y, Dpi.Px(56), Dpi.Px(44)), Anchor = fixedLeft };
             imageButton.Click += delegate { OpenImage(null); };
-            tips.SetToolTip(imageButton, "Get colours from a picture (or drop one on this window)");
+            tips.SetToolTip(imageButton, "Open a picture to get its colours. You can also drop one on this window.");
             Controls.Add(imageButton);
-            settingsButton = new FlatButton { Text = "\uE713", Bounds = new Rectangle(pad + leftW - Dpi.Px(40), y, Dpi.Px(40), Dpi.Px(44)), Anchor = fixedLeft };
-            settingsButton.Font = new Font("Segoe MDL2 Assets", 12f); // Windows 10/11 icon font
+            settingsButton = new FlatButton { Icon = ButtonIcon.Settings, Bounds = new Rectangle(pad + leftW - Dpi.Px(40), y, Dpi.Px(40), Dpi.Px(44)), Anchor = fixedLeft };
             settingsButton.Click += delegate { ShowSettingsMenu(); };
             tips.SetToolTip(settingsButton, "Settings");
             Controls.Add(pickButton);
@@ -89,8 +91,12 @@ namespace ColorPicker
             }
             y += Dpi.Px(8);
 
-            saveButton = new FlatButton { Text = "Save to folder  ▾", Bounds = new Rectangle(pad, y, leftW, Dpi.Px(36)), Anchor = fixedLeft };
-            saveButton.Click += delegate { ShowSaveMenu(); };
+            saveButton = new FlatButton { Icon = ButtonIcon.SaveFolder, Text = "Save to folder  ▾", Bounds = new Rectangle(pad, y, leftW, Dpi.Px(36)), Anchor = fixedLeft };
+            saveButton.Click += delegate
+            {
+                if (OpenFolder != null) SaveTo(OpenFolder); // inside a folder: one click adds to it
+                else ShowSaveMenu();
+            };
             Controls.Add(saveButton);
 
             // ---- divider ----
@@ -98,21 +104,47 @@ namespace ColorPicker
             divider.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left;
             Controls.Add(divider);
 
-            // ---- right column: recent colours and folders ----
-            folderButton = new FlatButton { Bounds = new Rectangle(rightX, pad, rightW - Dpi.Px(42), Dpi.Px(34)), Anchor = stretch, AlignLeft = true };
-            folderButton.Click += delegate { ShowFolderPicker(); };
-            folderMenuButton = new FlatButton { Text = "⋯", Bounds = new Rectangle(rightX + rightW - Dpi.Px(36), pad, Dpi.Px(36), Dpi.Px(34)), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            // ---- right column: folder cards, or the colours of one folder ----
+            int headH = Dpi.Px(44); // same height as the Pick row, so both columns line up
+            backButton = new FlatButton { Icon = ButtonIcon.Back, Bounds = new Rectangle(rightX, pad, Dpi.Px(44), headH), Anchor = AnchorStyles.Top | AnchorStyles.Left };
+            backButton.Click += delegate { inFolder = false; RefreshTiles(); };
+            tips.SetToolTip(backButton, "Back to all folders");
+            header.Font = new Font(Font.FontFamily, 11f, FontStyle.Bold);
+            header.TextAlign = ContentAlignment.MiddleLeft;
+            header.AutoEllipsis = true;
+            header.Bounds = new Rectangle(rightX, pad, rightW - Dpi.Px(130), headH);
+            header.Anchor = stretch;
+            newFolderButton = new FlatButton { Icon = ButtonIcon.AddFolder, Bounds = new Rectangle(rightX + rightW - Dpi.Px(56), pad, Dpi.Px(56), headH), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            tips.SetToolTip(newFolderButton, "New folder");
+            newFolderButton.Click += delegate { NewFolder(); };
+            folderMenuButton = new FlatButton { Text = "⋯", Bounds = new Rectangle(rightX + rightW - Dpi.Px(44), pad, Dpi.Px(44), headH), Anchor = AnchorStyles.Top | AnchorStyles.Right };
             folderMenuButton.Font = new Font(Font.FontFamily, 11f, FontStyle.Bold);
             folderMenuButton.Click += delegate { ShowFolderMenu(); };
-            tips.SetToolTip(folderMenuButton, "New, rename or delete folders");
-            Controls.Add(folderButton);
+            tips.SetToolTip(folderMenuButton, "Rename, duplicate or delete this folder");
+            Controls.Add(backButton);
+            Controls.Add(header);
+            Controls.Add(newFolderButton);
             Controls.Add(folderMenuButton);
 
-            int tilesY = pad + Dpi.Px(34) + Dpi.Px(10), hintH = Dpi.Px(20);
+            int tilesY = pad + headH + Dpi.Px(12), hintH = Dpi.Px(20);
             tiles.Bounds = new Rectangle(rightX - Dpi.Px(3), tilesY, rightW + Dpi.Px(6), ClientSize.Height - tilesY - pad - hintH);
             tiles.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             tiles.AutoScroll = true;
+            tiles.HandleCreated += delegate { Theme.ApplyScrollbars(tiles); };
             Controls.Add(tiles);
+
+            cardList.Bounds = tiles.Bounds;
+            cardList.Anchor = tiles.Anchor;
+            cardList.FlowDirection = FlowDirection.TopDown;
+            cardList.WrapContents = false;
+            // Vertical scrolling only.
+            cardList.AutoScroll = false;
+            cardList.HorizontalScroll.Maximum = 0;
+            cardList.HorizontalScroll.Visible = false;
+            cardList.AutoScroll = true;
+            cardList.Resize += delegate { FitCards(); };
+            cardList.HandleCreated += delegate { Theme.ApplyScrollbars(cardList); };
+            Controls.Add(cardList);
             emptyLabel.AutoSize = true;
             emptyLabel.MaximumSize = new Size(rightW, 0);
             emptyLabel.Margin = new Padding(Dpi.Px(3));
@@ -131,7 +163,6 @@ namespace ColorPicker
             store.Changed += RefreshTiles;
             SetCurrent(store.History.Count > 0 ? (Color?)store.History[0] : null);
             ApplyTheme();
-            if (imageWindow != null) imageWindow.ApplyTheme();
             RefreshTiles();
         }
 
@@ -143,9 +174,12 @@ namespace ColorPicker
             BackColor = p.Back;
             ForeColor = p.Text;
             divider.BackColor = p.Line;
-            tiles.BackColor = p.Back;
+            tiles.BackColor = cardList.BackColor = p.Back;
             emptyLabel.ForeColor = p.Muted;
             hint.ForeColor = p.Muted;
+            header.ForeColor = p.Text;
+            Theme.ApplyScrollbars(tiles);
+            Theme.ApplyScrollbars(cardList);
             Theme.ApplyTitleBar(this);
             foreach (Control c in Controls) c.Invalidate(true);
         }
@@ -257,6 +291,12 @@ namespace ColorPicker
         void UsePick(Color c)
         {
             Clip.Copy(ColorFormats.Format(c, store.Format));
+            // Inside a folder, picks go straight into it (once) as well as into Recent.
+            if (OpenFolder != null && !store.FolderContains(OpenFolder, c))
+            {
+                try { store.AddToFolder(OpenFolder, c); }
+                catch (Exception ex) { MessageBox.Show(this, "Couldn't save to " + OpenFolder + ": " + ex.Message, WindowTitle); }
+            }
             store.AddHistory(c);
             SetCurrent(c);
             rows[(int)store.Format].FlashCopied();
@@ -275,7 +315,32 @@ namespace ColorPicker
             current = c;
             swatch.Color = c;
             foreach (var row in rows) row.SetColor(c);
-            saveButton.Enabled = c != null;
+            UpdateSaveButton();
+        }
+
+        // The folder that's open, or null on the folder list and in Recent colours.
+        string OpenFolder { get { return inFolder ? folder : null; } }
+
+        // Folder list: "Save to folder ▾" (choose one). Inside a folder: "Add to <name>",
+        // or "In <name> ✓" when the colour is already there.
+        void UpdateSaveButton()
+        {
+            string open = OpenFolder;
+            if (open == null)
+            {
+                saveButton.Text = "Save to folder  ▾";
+                saveButton.Enabled = current != null;
+            }
+            else if (current != null && store.FolderContains(open, current.Value))
+            {
+                saveButton.Text = "In " + open + "  ✓";
+                saveButton.Enabled = false;
+            }
+            else
+            {
+                saveButton.Text = "Add to " + open;
+                saveButton.Enabled = current != null;
+            }
         }
 
         // ---------- menus ----------
@@ -303,9 +368,7 @@ namespace ColorPicker
             menu.Items.Add("New folder…", null, delegate
             {
                 string name = AskName("New folder", "");
-                if (name == null) return;
-                store.CreateFolder(name);
-                SaveTo(name);
+                if (name != null && CreateFolder(name)) SaveTo(name);
             });
             Theme.FitMenuWidth(menu, saveButton.Width);
             menu.Show(saveButton, new Point(0, saveButton.Height));
@@ -315,50 +378,36 @@ namespace ColorPicker
         {
             try
             {
-                folder = name;
                 store.AddToFolder(name, current.Value);
+                if (OpenFolder != null) { UpdateSaveButton(); return; }
                 saveButton.Text = "Saved to " + name + "  ✓";
                 var t = new Timer { Interval = 1500 };
-                t.Tick += delegate { t.Dispose(); saveButton.Text = "Save to folder  ▾"; };
+                t.Tick += delegate { t.Dispose(); UpdateSaveButton(); };
                 t.Start();
             }
             catch (Exception ex) { MessageBox.Show(this, "Couldn't save: " + ex.Message, WindowTitle); }
         }
 
-        void ShowFolderPicker()
-        {
-            var menu = NewMenu();
-            var recent = new ToolStripMenuItem(RecentName, null, delegate { folder = null; RefreshTiles(); }) { Checked = folder == null };
-            menu.Items.Add(recent);
-            var folders = store.GetFolders();
-            if (folders.Count > 0) menu.Items.Add(new ToolStripSeparator());
-            foreach (var name in folders)
-            {
-                string target = name;
-                menu.Items.Add(new ToolStripMenuItem(name, null, delegate { folder = target; RefreshTiles(); }) { Checked = name == folder });
-            }
-            menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("New folder…", null, delegate { NewFolder(); });
-            Theme.FitMenuWidth(menu, folderButton.Width);
-            menu.Show(folderButton, new Point(0, folderButton.Height));
-        }
+        void ShowFolderMenu() { ShowFolderMenu(folder, folderMenuButton, new Point(folderMenuButton.Width, folderMenuButton.Height), true); }
 
-        void ShowFolderMenu()
+        void ShowFolderMenu(string name, Control anchor, Point at, bool alignRight)
         {
+            if (name == null) return;
             var menu = NewMenu();
             menu.ShowCheckMargin = false;
-            string sel = folder;
-            menu.Items.Add("New folder…", null, delegate { NewFolder(); });
-            var rename = menu.Items.Add("Rename folder…", null, delegate
+            menu.Items.Add("Rename folder…", null, delegate
             {
-                string name = AskName("Rename folder", sel);
-                if (name == null || name == sel) return;
-                try { folder = name; store.RenameFolder(sel, name); }
-                catch (Exception ex) { folder = sel; MessageBox.Show(this, "Couldn't rename: " + ex.Message, WindowTitle); }
+                string newName = AskName("Rename folder", name);
+                if (newName == null || newName == name) return;
+                string was = folder;
+                try { if (folder == name) folder = newName; store.RenameFolder(name, newName); }
+                catch (Exception ex) { folder = was; MessageBox.Show(this, "Couldn't rename: " + ex.Message, WindowTitle); }
             });
-            var delete = menu.Items.Add("Delete folder…", null, delegate { DeleteFolder(sel); });
-            rename.Enabled = delete.Enabled = sel != null;
-            menu.Show(folderMenuButton, new Point(folderMenuButton.Width, folderMenuButton.Height), ToolStripDropDownDirection.BelowLeft);
+            menu.Items.Add("Duplicate folder…", null, delegate { DuplicateFolder(name); });
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Delete folder…", null, delegate { DeleteFolder(name); });
+            if (alignRight) menu.Show(anchor, at, ToolStripDropDownDirection.BelowLeft);
+            else menu.Show(anchor, at);
         }
 
         void ShowSettingsMenu()
@@ -375,8 +424,8 @@ namespace ColorPicker
             menu.Items.Add(new ToolStripMenuItem("Dark theme", null, delegate { ToggleTheme(); }) { Checked = store.Dark });
             menu.Items.Add(new ToolStripMenuItem("Keep on top", null, delegate { store.OnTop = !store.OnTop; TopMost = store.OnTop; if (imageWindow != null) imageWindow.TopMost = TopMost; }) { Checked = store.OnTop });
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("Where colours are saved…", null, delegate { ChooseStorage(); });
-            menu.Items.Add("Open saved colours folder", null, delegate
+            menu.Items.Add("Change where colours are saved…", null, delegate { ChooseStorage(); });
+            menu.Items.Add("Show saved colours in File Explorer", null, delegate
             {
                 System.IO.Directory.CreateDirectory(store.StorageDir);
                 System.Diagnostics.Process.Start("explorer.exe", "\"" + store.StorageDir + "\"");
@@ -393,9 +442,24 @@ namespace ColorPicker
         void NewFolder()
         {
             string name = AskName("New folder", "");
-            if (name == null) return;
-            folder = name;
-            store.CreateFolder(name);
+            if (name != null) CreateFolder(name);
+        }
+
+        bool CreateFolder(string name)
+        {
+            try { store.CreateFolder(name); return true; }
+            catch (Exception ex) { MessageBox.Show(this, "Couldn't make the folder: " + ex.Message, WindowTitle); return false; }
+        }
+
+        // Copies a folder and its colours under a new name the person chooses.
+        void DuplicateFolder(string name)
+        {
+            string suggestion = name + " copy";
+            for (int i = 2; store.ValidateName(suggestion, null) != null && i < 100; i++) suggestion = name + " copy " + i;
+            string newName = Prompt.Ask(this, "Duplicate folder", suggestion, n => store.ValidateName(n, null));
+            if (newName == null) return;
+            try { store.DuplicateFolder(name, newName); }
+            catch (Exception ex) { MessageBox.Show(this, "Couldn't duplicate: " + ex.Message, WindowTitle); }
         }
 
         void DeleteFolder(string name)
@@ -405,8 +469,8 @@ namespace ColorPicker
             var answer = MessageBox.Show(this, "Delete \"" + name + "\" and its " + n + (n == 1 ? " colour" : " colours") + "?\n\nYou can get it back from the Recycle Bin.",
                 "Delete folder", MessageBoxButtons.OKCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
             if (answer != DialogResult.OK) return;
-            try { folder = null; store.DeleteFolder(name); }
-            catch (Exception ex) { folder = name; MessageBox.Show(this, "Couldn't delete: " + ex.Message, WindowTitle); }
+            try { store.DeleteFolder(name); }
+            catch (Exception ex) { MessageBox.Show(this, "Couldn't delete: " + ex.Message, WindowTitle); }
         }
 
         void ChooseStorage()
@@ -426,14 +490,27 @@ namespace ColorPicker
         void RefreshTiles()
         {
             if (IsDisposed) return;
-            if (folder != null && !store.GetFolders().Contains(folder)) folder = null;
-            folderButton.Text = (folder ?? RecentName) + "  ▾";
+            var folders = store.GetFolders();
+            if (folder != null && !folders.Contains(folder)) { folder = null; inFolder = false; }
+
+            UpdateSaveButton();
+            backButton.Visible = inFolder;
+            folderMenuButton.Visible = inFolder && folder != null;
+            newFolderButton.Visible = !inFolder;
+            int left = tiles.Left + Dpi.Px(3);
+            header.Left = inFolder ? backButton.Right + Dpi.Px(10) : left;
+            header.Width = (inFolder ? folderMenuButton.Left : newFolderButton.Left) - Dpi.Px(8) - header.Left;
+            header.Text = inFolder ? (folder ?? RecentName) : "Folders";
+
+            tiles.Visible = inFolder;
+            cardList.Visible = !inFolder;
+            if (!inFolder) { ShowCards(folders); return; }
 
             IList<Color> colors = folder != null ? (IList<Color>)store.ReadFolder(folder) : store.History;
             string shownFolder = folder;
 
             tiles.SuspendLayout();
-            foreach (Control c in tiles.Controls) if (c != emptyLabel) c.Dispose();
+            foreach (Control c in tiles.Controls) if (c != emptyLabel) { tips.SetToolTip(c, null); c.Dispose(); }
             tiles.Controls.Clear();
             if (colors.Count == 0)
             {
@@ -459,7 +536,7 @@ namespace ColorPicker
                         menu.Items.Add("Select", null, delegate { SetCurrent(c); });
                         menu.Items.Add("Copy " + ColorFormats.Hex(c), null, delegate { Clip.Copy(ColorFormats.Hex(c)); });
                         menu.Items.Add(new ToolStripSeparator());
-                        menu.Items.Add(shownFolder != null ? "Remove from folder" : "Remove from recent", null, delegate
+                        menu.Items.Add(shownFolder != null ? "Remove from " + shownFolder : "Remove from Recent colours", null, delegate
                         {
                             BeginInvoke(new Action(() =>
                             {
@@ -473,6 +550,51 @@ namespace ColorPicker
                 tiles.Controls.Add(tile);
             }
             tiles.ResumeLayout();
+        }
+
+        // One card per folder (Recent colours first): a strip of its 5 newest colours and its name.
+        void ShowCards(List<string> folders)
+        {
+            cardList.SuspendLayout();
+            foreach (Control c in cardList.Controls) if (c != emptyLabel) { tips.SetToolTip(c, null); c.Dispose(); }
+            cardList.Controls.Clear();
+
+            var recent = new List<Color>(store.History);
+            AddCard(RecentName, null, recent.GetRange(0, Math.Min(5, recent.Count)), recent.Count);
+            foreach (var name in folders)
+            {
+                var colors = store.ReadFolder(name);
+                colors.Reverse(); // newest last in the file
+                AddCard(name, name, colors.GetRange(0, Math.Min(5, colors.Count)), colors.Count);
+            }
+            if (folders.Count == 0)
+            {
+                emptyLabel.Text = "Make a folder to keep colours together. Pick a colour, then use Save to folder.";
+                cardList.Controls.Add(emptyLabel);
+            }
+            cardList.ResumeLayout();
+            FitCards();
+        }
+
+        void AddCard(string title, string name, List<Color> newest, int count)
+        {
+            var card = new FolderCard(title, newest, count) { Height = Dpi.Px(72), Margin = new Padding(Dpi.Px(3), Dpi.Px(3), Dpi.Px(3), Dpi.Px(5)) };
+            card.MouseUp += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Left) { folder = name; inFolder = true; RefreshTiles(); }
+                else if (e.Button == MouseButtons.Right && name != null) ShowFolderMenu(name, card, e.Location, false);
+            };
+            tips.SetToolTip(card, name == null ? "Your last " + Store.HistoryMax + " picks" : "Open " + name + "  ·  right-click to rename, duplicate or delete");
+            cardList.Controls.Add(card);
+        }
+
+        // Cards fill the width of the list (minus the scrollbar when there is one).
+        void FitCards()
+        {
+            int content = 0;
+            foreach (Control c in cardList.Controls) content += c.Height + c.Margin.Vertical;
+            int w = cardList.Width - Dpi.Px(8) - (content > cardList.Height ? SystemInformation.VerticalScrollBarWidth : 0);
+            foreach (Control c in cardList.Controls) if (c is FolderCard && c.Width != w) c.Width = w;
         }
 
         // ---------- misc ----------
@@ -502,11 +624,65 @@ namespace ColorPicker
         }
     }
 
+    // A folder in the list: strip of its newest colours (empty slots stay blank), name and count.
+    sealed class FolderCard : Control
+    {
+        readonly string title;
+        readonly List<Color> colors;
+        readonly int count;
+        bool hover;
+
+        public FolderCard(string title, List<Color> newest, int count)
+        {
+            this.title = title;
+            colors = newest;
+            this.count = count;
+            Cursor = Cursors.Hand;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var p = Theme.Current;
+            var g = e.Graphics;
+            g.Clear(p.Back);
+            Theme.FillRound(g, hover ? p.Hover : p.Surface, Theme.Inner(ClientRectangle), Dpi.Px(8));
+
+            int pad = Dpi.Px(10);
+            var strip = new Rectangle(pad, pad, Width - 2 * pad, Dpi.Px(28));
+            Theme.FillRound(g, p.Back, strip, Dpi.Px(6));
+            using (var path = Theme.RoundRect(strip, Dpi.Px(6)))
+            {
+                var oldClip = g.Clip;
+                g.SetClip(path);
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                for (int i = 0; i < colors.Count && i < 5; i++)
+                {
+                    int x0 = strip.X + strip.Width * i / 5, x1 = strip.X + strip.Width * (i + 1) / 5;
+                    using (var b = new SolidBrush(colors[i])) g.FillRectangle(b, x0, strip.Y, x1 - x0, strip.Height + 1);
+                }
+                g.Clip = oldClip;
+            }
+            Theme.DrawRound(g, p.Line, 1, strip, Dpi.Px(6));
+
+            var text = new Rectangle(pad + Dpi.Px(2), strip.Bottom, Width - 2 * pad - Dpi.Px(4), Height - strip.Bottom - Dpi.Px(2));
+            var flags = TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding;
+            TextRenderer.DrawText(g, title, Font, new Rectangle(text.X, text.Y, text.Width - Dpi.Px(80), text.Height), p.Text, flags | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, count == 1 ? "1 colour" : count + " colours", Font, text, p.Muted, flags | TextFormatFlags.Right);
+        }
+    }
+
     // Flat button painted with the current theme.
+    enum ButtonIcon { None, AddPicture, AddFolder, Settings, SaveFolder, OpenPicture, Back }
+
     sealed class FlatButton : Control
     {
         bool hover, down;
-        public bool Primary, AlignLeft;
+        public bool Primary, Spectrum;
+        public ButtonIcon Icon;
 
         public FlatButton()
         {
@@ -537,9 +713,157 @@ namespace ColorPicker
             }
             e.Graphics.Clear(Parent != null ? Parent.BackColor : p.Back);
             Theme.FillRound(e.Graphics, back, Theme.Inner(ClientRectangle), Dpi.Px(6));
-            var r = AlignLeft ? new Rectangle(Dpi.Px(12), 0, Width - Dpi.Px(20), Height) : ClientRectangle;
-            TextRenderer.DrawText(e.Graphics, Text, Font, r, fore,
-                TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | (AlignLeft ? TextFormatFlags.Left : TextFormatFlags.HorizontalCenter));
+            if (Spectrum && Enabled && p.Spectrum != null && p.Spectrum.Length > 1)
+                using (var path = Theme.RoundRect(Theme.Inner(ClientRectangle), Dpi.Px(6)))
+                using (var brush = new System.Drawing.Drawing2D.LinearGradientBrush(ClientRectangle, p.Spectrum[0], p.Spectrum[p.Spectrum.Length - 1], 0f))
+                {
+                    var blend = new System.Drawing.Drawing2D.ColorBlend(p.Spectrum.Length);
+                    blend.Colors = p.Spectrum;
+                    var pos = new float[p.Spectrum.Length];
+                    for (int i = 0; i < pos.Length; i++) pos[i] = (float)i / (pos.Length - 1);
+                    blend.Positions = pos;
+                    brush.InterpolationColors = blend;
+                    var oldClip = e.Graphics.Clip;
+                    e.Graphics.SetClip(path);
+                    e.Graphics.FillRectangle(brush, 0, Height - Dpi.Px(4), Width, Dpi.Px(4));
+                    e.Graphics.Clip = oldClip;
+                }
+            if (Icon != ButtonIcon.None) { DrawIcon(e.Graphics, fore); return; }
+            TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, fore,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.HorizontalCenter);
+        }
+
+        // Line icons stroked with the brand rainbow (or the text colour when there is none):
+        // "+ picture", "+ folder", the settings gear, and a "save into folder" icon shown before the text.
+        void DrawIcon(Graphics g, Color fore)
+        {
+            var p = Theme.Current;
+            float stroke = Math.Max(1.5f, Dpi.Scale * 1.8f);
+            float plus = Dpi.Px(9), gap = Dpi.Px(5), iw = Dpi.Px(20), ih = Dpi.Px(16);
+            float cy = Height / 2f;
+
+            // Work out the whole group's width so it can be centred.
+            bool hasPlus = Icon == ButtonIcon.AddPicture || Icon == ButtonIcon.AddFolder;
+            bool hasText = (Icon == ButtonIcon.SaveFolder || Icon == ButtonIcon.OpenPicture) && !string.IsNullOrEmpty(Text);
+            if (Icon == ButtonIcon.Settings) { iw = ih = Dpi.Px(20); }
+            if (Icon == ButtonIcon.SaveFolder || Icon == ButtonIcon.OpenPicture) { iw = Dpi.Px(18); ih = Dpi.Px(15); }
+            if (Icon == ButtonIcon.Back) { iw = Dpi.Px(16); ih = Dpi.Px(14); }
+            int textW = hasText ? TextRenderer.MeasureText(Text, Font).Width : 0;
+            float groupW = (hasPlus ? plus + gap : 0) + iw + (hasText ? Dpi.Px(8) + textW : 0);
+            float x = Math.Max(Dpi.Px(6), (Width - groupW) / 2f);
+            var bounds = new RectangleF(x, cy - ih / 2f, (hasPlus ? plus + gap : 0) + iw, ih);
+
+            Brush brush;
+            if (Enabled && p.Spectrum != null && p.Spectrum.Length > 1)
+            {
+                var lg = new LinearGradientBrush(new RectangleF(bounds.X - 1, bounds.Y - 1, bounds.Width + 2, bounds.Height + 2), p.Spectrum[0], p.Spectrum[p.Spectrum.Length - 1], 20f);
+                var blend = new ColorBlend(p.Spectrum.Length) { Colors = p.Spectrum };
+                var pos = new float[p.Spectrum.Length];
+                for (int i = 0; i < pos.Length; i++) pos[i] = (float)i / (pos.Length - 1);
+                blend.Positions = pos;
+                lg.InterpolationColors = blend;
+                brush = lg;
+            }
+            else brush = new SolidBrush(fore);
+
+            var oldMode = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (brush)
+            using (var pen = new Pen(brush, stroke) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+            {
+                if (hasPlus)
+                {
+                    g.DrawLine(pen, x, cy, x + plus, cy);
+                    g.DrawLine(pen, x + plus / 2f, cy - plus / 2f, x + plus / 2f, cy + plus / 2f);
+                    x += plus + gap;
+                }
+                var r = new RectangleF(x, cy - ih / 2f, iw, ih);
+
+                if (Icon == ButtonIcon.AddPicture || Icon == ButtonIcon.OpenPicture)
+                {
+                    using (var frame = RoundedRectF(r, Dpi.Px(3))) g.DrawPath(pen, frame);
+                    g.DrawLines(pen, new[]
+                    {
+                        new PointF(r.X + r.Width * 0.12f, r.Bottom - r.Height * 0.18f),
+                        new PointF(r.X + r.Width * 0.40f, r.Y + r.Height * 0.45f),
+                        new PointF(r.X + r.Width * 0.60f, r.Y + r.Height * 0.68f),
+                        new PointF(r.X + r.Width * 0.72f, r.Y + r.Height * 0.55f),
+                        new PointF(r.X + r.Width * 0.88f, r.Bottom - r.Height * 0.18f)
+                    });
+                    float sun = r.Height * 0.22f;
+                    g.DrawEllipse(pen, r.X + r.Width * 0.66f, r.Y + r.Height * 0.18f, sun, sun);
+                }
+                else if (Icon == ButtonIcon.AddFolder || Icon == ButtonIcon.SaveFolder)
+                {
+                    float tabW = r.Width * 0.42f, tabH = r.Height * 0.2f;
+                    using (var path = new GraphicsPath())
+                    {
+                        path.AddLines(new[]
+                        {
+                            new PointF(r.X, r.Bottom), new PointF(r.X, r.Y), new PointF(r.X + tabW, r.Y),
+                            new PointF(r.X + tabW + tabH, r.Y + tabH), new PointF(r.Right, r.Y + tabH), new PointF(r.Right, r.Bottom)
+                        });
+                        path.CloseFigure();
+                        g.DrawPath(pen, path);
+                    }
+                    if (Icon == ButtonIcon.AddFolder)
+                        g.DrawLine(pen, r.X, r.Y + tabH * 2f, r.Right, r.Y + tabH * 2f);
+                    else
+                    {
+                        // arrow going into the folder
+                        float ax = r.X + r.Width / 2f, top = r.Y + tabH * 1.9f, bottom = r.Bottom - r.Height * 0.2f, head = r.Height * 0.22f;
+                        g.DrawLine(pen, ax, top, ax, bottom);
+                        g.DrawLines(pen, new[] { new PointF(ax - head, bottom - head), new PointF(ax, bottom), new PointF(ax + head, bottom - head) });
+                    }
+                }
+                else if (Icon == ButtonIcon.Back)
+                {
+                    float head = r.Height / 2f;
+                    g.DrawLine(pen, r.X, cy, r.Right, cy);
+                    g.DrawLines(pen, new[] { new PointF(r.X + head, cy - head), new PointF(r.X, cy), new PointF(r.X + head, cy + head) });
+                }
+                else if (Icon == ButtonIcon.Settings)
+                {
+                    // gear: 8 teeth around a ring, with a hole in the middle
+                    float c0x = r.X + r.Width / 2f, c0y = r.Y + r.Height / 2f;
+                    float outer = r.Width / 2f, inner = outer * 0.74f;
+                    var pts = new List<PointF>();
+                    for (int t = 0; t < 8; t++)
+                    {
+                        double a = t * Math.PI / 4;
+                        double w = Math.PI / 4 * 0.28; // half width of a tooth
+                        foreach (var step in new[] { -1.6 * w, -w, w, 1.6 * w })
+                        {
+                            float rad = Math.Abs(step) > w * 1.1 ? inner : outer;
+                            pts.Add(new PointF(c0x + rad * (float)Math.Cos(a + step), c0y + rad * (float)Math.Sin(a + step)));
+                        }
+                    }
+                    using (var path = new GraphicsPath())
+                    {
+                        path.AddPolygon(pts.ToArray());
+                        g.DrawPath(pen, path);
+                    }
+                    float hole = outer * 0.36f;
+                    g.DrawEllipse(pen, c0x - hole, c0y - hole, hole * 2, hole * 2);
+                }
+
+                if (hasText)
+                    TextRenderer.DrawText(g, Text, Font, new Rectangle((int)(r.Right + Dpi.Px(8)), 0, Width - (int)(r.Right + Dpi.Px(8)) - Dpi.Px(4), Height), fore,
+                        TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+            }
+            g.SmoothingMode = oldMode;
+        }
+
+        static GraphicsPath RoundedRectF(RectangleF r, float radius)
+        {
+            float d = radius * 2;
+            var path = new GraphicsPath();
+            path.AddArc(r.X, r.Y, d, d, 180, 90);
+            path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
         }
     }
 

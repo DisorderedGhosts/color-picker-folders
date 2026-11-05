@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Windows.Forms;
 
@@ -41,7 +42,7 @@ namespace ColorPicker
             int pad = Dpi.Px(16), rightW = Dpi.Px(280), rightX = ClientSize.Width - pad - rightW;
             var right = AnchorStyles.Top | AnchorStyles.Right;
 
-            view.Bounds = new Rectangle(pad, pad, rightX - 2 * pad, ClientSize.Height - 2 * pad - Dpi.Px(24));
+            view.Bounds = new Rectangle(pad, pad, rightX - 2 * pad, ClientSize.Height - 2 * pad - Dpi.Px(36) - Dpi.Px(12));
             view.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             view.Picked += c => onPick(c);
             Controls.Add(view);
@@ -49,12 +50,12 @@ namespace ColorPicker
             hint.Text = "Click the picture to pick an exact pixel";
             hint.Font = new Font(Font.FontFamily, 8.5f);
             hint.TextAlign = ContentAlignment.MiddleLeft;
-            hint.Bounds = new Rectangle(pad, ClientSize.Height - pad - Dpi.Px(18), rightX - 2 * pad - Dpi.Px(130), Dpi.Px(18));
+            hint.AutoEllipsis = true;
+            hint.Bounds = new Rectangle(pad, ClientSize.Height - pad - Dpi.Px(36), rightX - 2 * pad - Dpi.Px(170), Dpi.Px(36));
             hint.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             Controls.Add(hint);
 
-            openButton = new FlatButton { Text = "Open another…", Bounds = new Rectangle(rightX - pad - Dpi.Px(120), ClientSize.Height - pad - Dpi.Px(22), Dpi.Px(120), Dpi.Px(26)), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
-            openButton.Font = new Font(Font.FontFamily, 8.5f);
+            openButton = new FlatButton { Icon = ButtonIcon.OpenPicture, Text = "Open another…", Bounds = new Rectangle(rightX - pad - Dpi.Px(160), ClientSize.Height - pad - Dpi.Px(36), Dpi.Px(160), Dpi.Px(36)), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
             openButton.Click += delegate { BrowseAndLoad(); };
             Controls.Add(openButton);
 
@@ -77,7 +78,7 @@ namespace ColorPicker
             paletteScroll.Resize += delegate { FitPalette(); };
             Controls.Add(paletteScroll);
 
-            saveAll = new FlatButton { Text = "Save all to folder  ▾", Bounds = new Rectangle(rightX, ClientSize.Height - pad - saveH, rightW, saveH), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
+            saveAll = new FlatButton { Icon = ButtonIcon.SaveFolder, Text = "Save all to folder  ▾", Bounds = new Rectangle(rightX, ClientSize.Height - pad - saveH, rightW, saveH), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
             saveAll.Click += delegate { ShowSaveMenu(); };
             Controls.Add(saveAll);
 
@@ -91,6 +92,7 @@ namespace ColorPicker
             BackColor = paletteScroll.BackColor = p.Back;
             ForeColor = p.Text;
             hint.ForeColor = p.Muted;
+            Theme.ApplyScrollbars(paletteScroll);
             Theme.ApplyTitleBar(this);
             foreach (Control c in Controls) c.Invalidate(true);
             palette.Invalidate();
@@ -185,7 +187,8 @@ namespace ColorPicker
             {
                 string name = Prompt.Ask(this, "New folder", "", n => store.ValidateName(n, null));
                 if (name == null) return;
-                store.CreateFolder(name);
+                try { store.CreateFolder(name); }
+                catch (Exception ex) { MessageBox.Show(this, "Couldn't make the folder: " + ex.Message, MainWindow.WindowTitle); return; }
                 SaveAll(name, colors);
             });
             Theme.FitMenuWidth(menu, saveAll.Width);
@@ -251,6 +254,7 @@ namespace ColorPicker
         const int Cells = 11;
         readonly int zoom = Math.Max(8, Dpi.Px(10));
         Bitmap image;
+        Bitmap scaled;          // the picture resized once to its on-screen size, so the magnifier stays smooth on big photos
         Rectangle shown;        // where the picture is drawn, in control coordinates
         Point mouse = new Point(-1, -1);
         Rectangle lastLens;
@@ -270,10 +274,18 @@ namespace ColorPicker
 
         void Fit()
         {
-            if (image == null) { shown = Rectangle.Empty; return; }
+            if (scaled != null) { scaled.Dispose(); scaled = null; }
+            if (image == null || Width <= 0 || Height <= 0) { shown = Rectangle.Empty; return; }
             double s = Math.Min((double)Width / image.Width, (double)Height / image.Height);
             int w = Math.Max(1, (int)(image.Width * s)), h = Math.Max(1, (int)(image.Height * s));
             shown = new Rectangle((Width - w) / 2, (Height - h) / 2, w, h);
+            scaled = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
+            using (var g = Graphics.FromImage(scaled))
+            {
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.DrawImage(image, new Rectangle(0, 0, w, h));
+            }
         }
 
         protected override void OnResize(EventArgs e) { base.OnResize(e); Fit(); }
@@ -351,11 +363,7 @@ namespace ColorPicker
                 return;
             }
 
-            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.DrawImage(image, shown);
-            g.InterpolationMode = InterpolationMode.Default;
-            g.PixelOffsetMode = PixelOffsetMode.Default;
+            if (scaled != null) g.DrawImageUnscaled(scaled, shown.Location);
 
             var at = ToImage(mouse);
             if (at.X < 0) return;
@@ -390,7 +398,11 @@ namespace ColorPicker
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing && image != null) { image.Dispose(); image = null; }
+            if (disposing)
+            {
+                if (image != null) { image.Dispose(); image = null; }
+                if (scaled != null) { scaled.Dispose(); scaled = null; }
+            }
             base.Dispose(disposing);
         }
     }

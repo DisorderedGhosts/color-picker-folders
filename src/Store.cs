@@ -23,7 +23,7 @@ namespace ColorPicker
         bool onTop;
         bool dark = true;
         string storageDir;
-        bool customStorage; // false = the default Folders dir next to settings.ini, so a moved portable copy keeps working
+        bool customStorage; // false = the default Documents\Color Picker, so it follows the user's Documents folder
         readonly List<Color> history = new List<Color>();
 
         Store(string home)
@@ -43,9 +43,12 @@ namespace ColorPicker
             Directory.CreateDirectory(home);
             var s = new Store(home);
             MoveOldData(s.settingsPath);
-            if (File.Exists(s.settingsPath))
+            string[] lines;
+            try { lines = File.Exists(s.settingsPath) ? File.ReadAllLines(s.settingsPath) : null; }
+            catch (Exception) { lines = null; } // unreadable settings: start with the defaults
+            if (lines != null)
             {
-                foreach (var line in File.ReadAllLines(s.settingsPath))
+                foreach (var line in lines)
                 {
                     int eq = line.IndexOf('=');
                     if (eq <= 0) continue;
@@ -173,8 +176,14 @@ namespace ColorPicker
 
         public List<string> GetFolders()
         {
-            if (!Directory.Exists(storageDir)) return new List<string>();
-            var names = Directory.GetFiles(storageDir, "*" + Ext).Select(f => Path.GetFileNameWithoutExtension(f)).ToList();
+            List<string> names;
+            try
+            {
+                if (!Directory.Exists(storageDir)) return new List<string>();
+                names = Directory.GetFiles(storageDir, "*" + Ext).Select(f => Path.GetFileNameWithoutExtension(f)).ToList();
+            }
+            catch (IOException) { return new List<string>(); }               // e.g. a removed USB drive
+            catch (UnauthorizedAccessException) { return new List<string>(); }
             names.Sort(StringComparer.OrdinalIgnoreCase);
             return names;
         }
@@ -183,8 +192,11 @@ namespace ColorPicker
         {
             var list = new List<Color>();
             string p = PathOf(name);
-            if (!File.Exists(p)) return list;
-            foreach (var line in File.ReadAllLines(p))
+            string[] lines;
+            try { lines = File.Exists(p) ? File.ReadAllLines(p) : new string[0]; }
+            catch (IOException) { return list; }  // e.g. open in another app right now
+            catch (UnauthorizedAccessException) { return list; }
+            foreach (var line in lines)
             {
                 Color c;
                 if (ColorFormats.TryParseHex(line, out c)) list.Add(c);
@@ -224,6 +236,12 @@ namespace ColorPicker
             Notify();
         }
 
+        public void DuplicateFolder(string name, string newName)
+        {
+            File.Copy(PathOf(name), PathOf(newName));
+            Notify();
+        }
+
         // Sends the folder's file to the Recycle Bin, so a mistake can be undone.
         public void DeleteFolder(string name)
         {
@@ -235,15 +253,34 @@ namespace ColorPicker
 
         public void AddToFolder(string name, Color c)
         {
-            Directory.CreateDirectory(storageDir);
-            File.AppendAllText(PathOf(name), ColorFormats.Hex(c) + Environment.NewLine);
+            Append(name, new[] { ColorFormats.Hex(c) });
             Notify();
+        }
+
+        // Adds lines to the end of a folder file. If someone edited the file by hand and left
+        // no line break at the end, adds one first so two colours never end up on one line.
+        void Append(string name, IEnumerable<string> lines)
+        {
+            Directory.CreateDirectory(storageDir);
+            string p = PathOf(name);
+            var sb = new StringBuilder();
+            if (File.Exists(p))
+                using (var fs = File.OpenRead(p))
+                    if (fs.Length > 0) { fs.Seek(-1, SeekOrigin.End); if (fs.ReadByte() != '\n') sb.AppendLine(); }
+            foreach (var line in lines) sb.AppendLine(line);
+            File.AppendAllText(p, sb.ToString());
+        }
+
+        public bool FolderContains(string name, Color c)
+        {
+            int argb = Color.FromArgb(c.R, c.G, c.B).ToArgb();
+            foreach (var x in ReadFolder(name)) if (x.ToArgb() == argb) return true;
+            return false;
         }
 
         public void AddAllToFolder(string name, IEnumerable<Color> colors)
         {
-            Directory.CreateDirectory(storageDir);
-            File.AppendAllLines(PathOf(name), colors.Select(x => ColorFormats.Hex(x)));
+            Append(name, colors.Select(x => ColorFormats.Hex(x)));
             Notify();
         }
 
